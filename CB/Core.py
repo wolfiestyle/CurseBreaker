@@ -62,7 +62,8 @@ class Core:
                            'WAAPIKey': '',
                            'WACompanionVersion': 0,
                            'CFCacheTimestamp': 0,
-                           'CompactMode': False}
+                           'CompactMode': False,
+                           'AutoUpdate': True}
             self.save_config()
         if not os.path.isdir('WTF-Backup') and self.config['Backup']['Enabled']:
             os.mkdir('WTF-Backup')
@@ -108,7 +109,8 @@ class Core:
                         ['2.8.0', 'IgnoreClientVersion', {}],
                         ['3.0.1', 'CFCacheTimestamp', 0],
                         ['3.1.10', 'CFCacheCloudFlare', {}],
-                        ['3.7.0', 'CompactMode', False]]:
+                        ['3.7.0', 'CompactMode', False],
+                        ['3.10.0', 'AutoUpdate', True]]:
                 if add[1] not in self.config.keys():
                     self.config[add[1]] = add[2]
             for delete in [['1.3.0', 'URLCache'],
@@ -206,19 +208,22 @@ class Core:
 
     def parse_url_source(self, url):
         if url.startswith('https://www.curseforge.com/wow/addons/'):
-            return 'CF'
+            return 'CF', url
         elif url.startswith('https://www.wowinterface.com/downloads/'):
-            return 'WoWI'
+            return 'WoWI', url
         elif url.startswith('https://www.tukui.org/addons.php?id=') or \
-                url.startswith('https://www.tukui.org/classic-addons.php?id=') or \
-                url.lower().startswith('elvui') or \
-                url.lower().startswith('tukui') or \
-                url.lower() == 'shadow&light:dev':
-            return 'Tukui'
+                url.startswith('https://www.tukui.org/classic-addons.php?id='):
+            return 'Tukui', url
+        elif url.lower().startswith('elvui'):
+            return 'Tukui', 'https://www.tukui.org/download.php?ui=elvui'
+        elif url.lower().startswith('tukui'):
+            return 'Tukui', 'https://www.tukui.org/download.php?ui=tukui'
+        elif url.lower() == 'shadow&light:dev':
+            return 'Tukui', 'https://www.curseforge.com/wow/addons/elvui-shadow-light'
         elif url.startswith('https://github.com/'):
-            return 'GitHub'
+            return 'GitHub', url
         else:
-            return '?'
+            return '?', None
 
     def add_addon(self, url, ignore):
         if url.endswith(':'):
@@ -276,6 +281,7 @@ class Core:
     def update_addon(self, url, update, force):
         old = self.check_if_installed(url)
         if old:
+            source, sourceurl = self.parse_url_source(old['URL'])
             new = self.parse_url(old['URL'])
             oldversion = old['Version']
             if old['URL'] in self.checksumCache:
@@ -298,8 +304,8 @@ class Core:
             if force:
                 modified = False
                 blocked = False
-            return new.name, new.currentVersion, oldversion, modified, blocked, self.parse_url_source(old['URL'])
-        return url, False, False, False, False, self.parse_url_source(url)
+            return new.name, new.currentVersion, oldversion, modified, blocked, source, sourceurl, new.changelogUrl
+        return url, False, False, False, False, '?', None, None
 
     def check_checksum(self, addon, bulk=True):
         checksums = {}
@@ -366,15 +372,15 @@ class Core:
             return not state
         return None
 
-    def compact_mode_toggle(self):
-        self.config['CompactMode'] = not self.config['CompactMode']
-        self.save_config()
-        return self.config['CompactMode']
-
-    def backup_toggle(self):
-        self.config['Backup']['Enabled'] = not self.config['Backup']['Enabled']
-        self.save_config()
-        return self.config['Backup']['Enabled']
+    def generic_toggle(self, option, inside=None):
+        if inside:
+            self.config[option][inside] = not self.config[option][inside]
+            self.save_config()
+            return self.config[option][inside]
+        else:
+            self.config[option] = not self.config[option]
+            self.save_config()
+            return self.config[option]
 
     def backup_check(self):
         if self.config['Backup']['Enabled']:
