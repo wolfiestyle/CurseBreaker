@@ -67,7 +67,6 @@ class TUI:
             self.console.print('[bold red]This executable should be placed in the same directory where Wow.exe, '
                                'WowClassic.exe or World of Warcraft.app is located. Additionally, make sure that '
                                'this WoW installation was started at least once.[/bold red]\n')
-            pause(self.headless)
             sys.exit(1)
         # Detect Classic client
         if os.path.basename(os.getcwd()) == '_classic_':
@@ -81,7 +80,6 @@ class TUI:
         except IOError:
             self.console.print('[bold red]CurseBreaker doesn\'t have write rights for the current directory.\n'
                                'Try starting it with administrative privileges.[/bold red]\n')
-            pause(self.headless)
             sys.exit(1)
         self.auto_update()
         try:
@@ -89,7 +87,6 @@ class TUI:
         except RuntimeError:
             self.console.print('[bold red]The config file is corrupted. Restore the earlier version from backup.'
                                '[/bold red]\n')
-            pause(self.headless)
             sys.exit(1)
         self.setup_table()
         # Curse URI Support
@@ -156,7 +153,6 @@ class TUI:
                     self.handle_exception(e)
                 self.console.print('')
                 self.print_log()
-                pause(self.headless)
                 sys.exit(0)
         if self.headless:
             sys.exit(1)
@@ -230,7 +226,6 @@ class TUI:
             except Exception as e:
                 self.console.print(f'[bold red]Update failed!\n\nReason: {str(e)}[/bold red]\n')
                 self.print_log()
-                pause(self.headless)
                 sys.exit(1)
 
     def motd_parser(self):
