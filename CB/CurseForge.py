@@ -14,7 +14,7 @@ class CurseForgeAddon:
             self.payload = checkcache[project]
         else:
             self.payload = requests.get(f'https://addons-ecs.forgesvc.net/api/v2/addon/{project}',
-                                        headers=HEADERS)
+                                        headers=HEADERS, timeout=5)
             if self.payload.status_code == 404 or self.payload.status_code == 500:
                 raise RuntimeError(f'{url}\nThis might be a temporary issue with CurseForge API or the project was '
                                    f'removed/renamed. In this case, uninstall it (and reinstall if it still exists) '
@@ -35,9 +35,16 @@ class CurseForgeAddon:
         self.downloadUrl = None
         self.changelogUrl = None
         self.currentVersion = None
+        self.uiVersion = None
         self.archive = None
+        self.dependencies = None
         self.directories = []
+        self.author = []
         self.get_current_version()
+
+        for author in self.payload['authors']:
+            if '_ForgeUser' not in author['name']:
+                self.author.append(author['name'])
 
     def get_current_version(self):
         files = sorted(self.payload['latestFiles'], key=itemgetter('id'), reverse=True)
@@ -53,6 +60,15 @@ class CurseForgeAddon:
                     self.downloadUrl = f['downloadUrl']
                     self.changelogUrl = f'{self.payload["websiteUrl"]}/files/{f["id"]}'
                     self.currentVersion = f['displayName']
+                    if len(f['gameVersion']) > 0:
+                        self.uiVersion = max(f['gameVersion'])
+                    if len(f['dependencies']) > 0:
+                        self.dependencies = []
+                        for d in f['dependencies']:
+                            if d['type'] == 3:
+                                self.dependencies.append(d['addonId'])
+                        if len(self.dependencies) == 0:
+                            self.dependencies = None
                     break
             if self.downloadUrl and self.currentVersion:
                 break
@@ -61,7 +77,7 @@ class CurseForgeAddon:
 
     @retry()
     def get_addon(self):
-        self.archive = zipfile.ZipFile(io.BytesIO(requests.get(self.downloadUrl, headers=HEADERS).content))
+        self.archive = zipfile.ZipFile(io.BytesIO(requests.get(self.downloadUrl, headers=HEADERS, timeout=5).content))
         for file in self.archive.namelist():
             if '/' not in os.path.dirname(file):
                 self.directories.append(os.path.dirname(file))

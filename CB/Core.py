@@ -12,6 +12,7 @@ import shutil
 import zipfile
 import datetime
 import requests
+import itertools
 import cloudscraper
 from pathlib import Path
 from collections import Counter
@@ -33,10 +34,13 @@ class Core:
         self.configPath = Path('WTF/CurseBreaker.json')
         self.cachePath = Path('WTF/CurseBreaker.cache')
         self.clientType = 'wow_retail'
-        self.wagoCompanionVersion = 111
+        self.wagoCompanionVersion = 1110
+        self.currentRetailVersion = '9.0.1'
+        self.currentClassicVersion = '1.13.5'
         self.config = None
         self.cfIDs = None
-        self.cfDirs = None
+        self.dirIndex = None
+        self.blocklist = None
         self.cfCache = {}
         self.wowiCache = {}
         self.checksumCache = {}
@@ -63,7 +67,8 @@ class Core:
                            'WACompanionVersion': 0,
                            'CFCacheTimestamp': 0,
                            'CompactMode': False,
-                           'AutoUpdate': True}
+                           'AutoUpdate': True,
+                           'ShowAuthors': True}
             self.save_config()
         if not os.path.isdir('WTF-Backup') and self.config['Backup']['Enabled']:
             os.mkdir('WTF-Backup')
@@ -76,7 +81,7 @@ class Core:
     def update_config(self):
         if 'Version' not in self.config.keys() or self.config['Version'] != __version__:
             urlupdate = {'elvui-classic': 'elvui', 'elvui-classic:dev': 'elvui:dev', 'tukui-classic': 'tukui',
-                         'sle:dev': 'shadow&light:dev'}
+                         'sle:dev': 'shadow&light:dev', 'elvui:beta': 'elvui:dev'}
             for addon in self.config['Addons']:
                 # 1.1.0
                 if 'Checksums' not in addon.keys():
@@ -87,7 +92,7 @@ class Core:
                 # 1.1.1
                 if addon['Version'] is None:
                     addon['Version'] = '1'
-                # 2.2.0, 3.9.4
+                # 2.2.0, 3.9.4, 3.12.0
                 if addon['URL'].lower() in urlupdate:
                     addon['URL'] = urlupdate[addon['URL'].lower()]
                 # 2.4.0
@@ -110,7 +115,8 @@ class Core:
                         ['3.0.1', 'CFCacheTimestamp', 0],
                         ['3.1.10', 'CFCacheCloudFlare', {}],
                         ['3.7.0', 'CompactMode', False],
-                        ['3.10.0', 'AutoUpdate', True]]:
+                        ['3.10.0', 'AutoUpdate', True],
+                        ['3.12.0', 'ShowAuthors', True]]:
                 if add[1] not in self.config.keys():
                     self.config[add[1]] = add[2]
             for delete in [['1.3.0', 'URLCache'],
@@ -162,6 +168,13 @@ class Core:
                 shutil.rmtree(self.path / directory, ignore_errors=True)
 
     def parse_url(self, url):
+        if not self.blocklist:
+            self.blocklist = pickle.load(gzip.open(io.BytesIO(requests.get(
+                f'https://storage.googleapis.com/cursebreaker/blocklist.pickle.gz', headers=HEADERS,
+                timeout=5).content)))
+        for block in self.blocklist:
+            if block in url.lower():
+                raise RuntimeError(f'{url}\nThe addon is unavailable. You can\'t manage it with this application.')
         if url.startswith('https://www.curseforge.com/wow/addons/'):
             return CurseForgeAddon(url, self.parse_cf_id(url), self.cfCache,
                                    'wow' if url in self.config['IgnoreClientVersion'].keys() else self.clientType,
@@ -190,9 +203,6 @@ class Core:
                 return GitLabAddon('ElvUI', '60', 'elvui/elvui', 'development')
             else:
                 return GitLabAddon('ElvUI', '492', 'elvui/elvui-classic', 'development')
-        # TODO Remove after 9.0 release
-        elif url.lower() == 'elvui:beta':
-            return GitLabAddon('ElvUI', '60', 'elvui/elvui', 'beta')
         elif url.lower() == 'tukui':
             if self.clientType == 'wow_retail':
                 return GitLabAddon('Tukui', '77', 'Tukz/Tukui', 'master')
@@ -250,7 +260,7 @@ class Core:
             new.get_addon()
             addon = self.check_if_installed_dirs(new.directories)
             if addon:
-                return False, addon['Name'], addon['Version']
+                return False, addon['Name'], addon['Version'], None
             self.cleanup(new.directories)
             new.install(self.path)
             checksums = {}
@@ -263,8 +273,8 @@ class Core:
                                           'Checksums': checksums
                                           })
             self.save_config()
-            return True, new.name, new.currentVersion
-        return False, addon['Name'], addon['Version']
+            return True, new.name, new.currentVersion, new.dependencies
+        return False, addon['Name'], addon['Version'], None
 
     def del_addon(self, url, keep):
         old = self.check_if_installed(url)
@@ -281,8 +291,9 @@ class Core:
     def update_addon(self, url, update, force):
         old = self.check_if_installed(url)
         if old:
-            source, sourceurl = self.parse_url_source(old['URL'])
             new = self.parse_url(old['URL'])
+            dev = self.check_if_dev(old['URL'])
+            source, sourceurl = self.parse_url_source(old['URL'])
             oldversion = old['Version']
             if old['URL'] in self.checksumCache:
                 modified = self.checksumCache[old['URL']]
@@ -304,8 +315,9 @@ class Core:
             if force:
                 modified = False
                 blocked = False
-            return new.name, new.currentVersion, oldversion, modified, blocked, source, sourceurl, new.changelogUrl
-        return url, False, False, False, False, '?', None, None
+            return new.name, new.author, new.currentVersion, oldversion, new.uiVersion, modified, blocked, source, \
+                sourceurl, new.changelogUrl, new.dependencies, dev
+        return url, [], False, False, None, False, False, '?', None, None, None, None
 
     def check_checksum(self, addon, bulk=True):
         checksums = {}
@@ -321,7 +333,7 @@ class Core:
         self.checksumCache[result[0]] = result[1]
 
     def bulk_check_checksum(self, addons, pbar):
-        with Pool() as pool:
+        with Pool(processes=min(60, os.cpu_count() or 1)) as pool:
             workers = []
             for addon in addons:
                 w = pool.apply_async(self.check_checksum, (addon, ), callback=self.bulk_check_checksum_callback)
@@ -442,7 +454,7 @@ class Core:
     def search(self, query):
         results = []
         payload = requests.get(f'https://addons-ecs.forgesvc.net/api/v2/addon/search?gameId=1&pageSize=10&searchFilter='
-                               f'{html.escape(query.strip())}', headers=HEADERS).json()
+                               f'{html.escape(query.strip())}', headers=HEADERS, timeout=5).json()
         for result in payload:
             results.append(result['websiteUrl'])
         return results
@@ -458,14 +470,15 @@ class Core:
                           + os.path.abspath(sys.executable).replace('\\', '\\\\') + '\\" \\"%1\\""')
 
     @retry()
-    def parse_cf_id(self, url, bulk=False):
+    def parse_cf_id(self, url, bulk=False, reverse=False):
         if not self.cfIDs:
             # noinspection PyBroadException
             try:
                 if not os.path.isfile(self.cachePath) or time.time() - self.config['CFCacheTimestamp'] > 86400:
                     with open(self.cachePath, 'wb') as f:
                         f.write(gzip.decompress(requests.get(
-                            f'https://storage.googleapis.com/cursebreaker/cfid.pickle.gz', headers=HEADERS).content))
+                            f'https://storage.googleapis.com/cursebreaker/cfid.pickle.gz', headers=HEADERS,
+                            timeout=5).content))
                     self.config['CFCacheTimestamp'] = int(time.time())
                     self.save_config()
                 with open(self.cachePath, 'rb') as f:
@@ -473,6 +486,11 @@ class Core:
                 self.cfIDs = {**self.config['CFCacheCloudFlare'], **self.cfIDs}
             except Exception:
                 self.cfIDs = {}
+        if reverse:
+            try:
+                return list(self.cfIDs.keys())[list(self.cfIDs.values()).index(str(url))]
+            except ValueError:
+                return None
         slug = url.split('/')[-1]
         if slug in self.cfIDs:
             project = self.cfIDs[slug]
@@ -500,7 +518,8 @@ class Core:
     def parse_cf_xml(self, path):
         xml = parse(path)
         project = xml.childNodes[0].getElementsByTagName('project')[0].getAttribute('id')
-        payload = requests.get(f'https://addons-ecs.forgesvc.net/api/v2/addon/{project}', headers=HEADERS).json()
+        payload = requests.get(f'https://addons-ecs.forgesvc.net/api/v2/addon/{project}', headers=HEADERS,
+                               timeout=5).json()
         url = payload['websiteUrl'].strip()
         return url
 
@@ -510,18 +529,19 @@ class Core:
         ids_wowi = []
         for addon in addons:
             if addon['URL'].startswith('https://www.curseforge.com/wow/addons/'):
-                ids_cf.append(int(self.parse_cf_id(addon['URL'], True)))
+                ids_cf.append(int(self.parse_cf_id(addon['URL'], bulk=True)))
             elif addon['URL'].startswith('https://www.wowinterface.com/downloads/'):
                 ids_wowi.append(re.findall(r'\d+', addon['URL'])[0].strip())
         if len(ids_cf) > 0:
-            payload = requests.post('https://addons-ecs.forgesvc.net/api/v2/addon', json=ids_cf, headers=HEADERS).json()
+            payload = requests.post('https://addons-ecs.forgesvc.net/api/v2/addon', json=ids_cf,
+                                    headers=HEADERS, timeout=5).json()
             for addon in payload:
                 self.cfCache[str(addon['id'])] = addon
         if len(ids_wowi) > 0:
-            payload = requests.get(f'https://api.mmoui.com/v4/game/WOW/filedetails/{",".join(ids_wowi)}.json',
-                                   headers=HEADERS).json()
+            payload = requests.get(f'https://api.mmoui.com/v3/game/WOW/filedetails/{",".join(ids_wowi)}.json',
+                                   headers=HEADERS, timeout=5).json()
             for addon in payload:
-                self.wowiCache[str(addon['id'])] = addon
+                self.wowiCache[str(addon['UID'])] = addon
 
     def detect_accounts(self):
         if os.path.isdir(Path('WTF/Account')):
@@ -536,43 +556,92 @@ class Core:
             return []
 
     def detect_addons(self):
-        if not self.cfDirs:
-            self.cfDirs = pickle.load(gzip.open(io.BytesIO(
-                requests.get(f'https://storage.googleapis.com/cursebreaker/cfdir{self.clientType}.pickle.gz',
-                             headers=HEADERS).content)))
+        if not self.dirIndex:
+            self.dirIndex = pickle.load(gzip.open(io.BytesIO(
+                requests.get(f'https://storage.googleapis.com/cursebreaker/dir_{self.clientType}.pickle.gz',
+                             headers=HEADERS, timeout=5).content)))
         addon_dirs = os.listdir(self.path)
-        ignored = ['ElvUI_OptionsUI', 'Tukui_Config', '.DS_Store']
+        ignored = ['ElvUI_OptionsUI', 'Tukui_Config', '+Wowhead_Looter', 'WeakAurasCompanion', 'SharedMedia_MyMedia',
+                   '.DS_Store']
         hit = []
         partial_hit = []
-        partial_hit_tmp = []
-        partial_hit_raw = []
         miss = []
         for directory in addon_dirs:
             if os.path.isdir(self.path / directory) and not os.path.islink(self.path / directory) and \
-                    not os.path.isdir(self.path / directory / '.git'):
-                if directory in self.cfDirs:
-                    if len(self.cfDirs[directory]) > 1:
-                        partial_hit_raw.append(self.cfDirs[directory])
+                    not os.path.isdir(self.path / directory / '.git') and not directory.startswith('Blizzard_'):
+                if directory in self.dirIndex['single']['cf']:
+                    if len(self.dirIndex['single']['cf'][directory]) > 1:
+                        partial_hit.append(self.dirIndex['single']['cf'][directory])
                     elif not self.check_if_installed(f'https://www.curseforge.com/wow/addons/'
-                                                     f'{self.cfDirs[directory][0]}'):
-                        hit.append(f'cf:{self.cfDirs[directory][0]}')
+                                                     f'{self.dirIndex["single"]["cf"][directory][0]}'):
+                        if not (directory == 'ElvUI_SLE' and self.check_if_installed('Shadow&Light:Dev')):
+                            hit.append(f'cf:{self.dirIndex["single"]["cf"][directory][0]}')
                 else:
                     if directory == 'ElvUI' or directory == 'Tukui':
                         if not self.check_if_installed(directory):
                             hit.append(directory)
                     elif directory not in ignored:
                         miss.append(directory)
-        for partial in partial_hit_raw:
-            for slug in partial:
-                if f'cf:{slug}' in hit or self.check_if_installed(f'https://www.curseforge.com/wow/addons/{slug}'):
+        hit = list(set(hit))
+        partial_hit.sort()
+        partial_hit = list(partial_hit for partial_hit, _ in itertools.groupby(partial_hit))
+
+        partial_hit_parsed = []
+        for partial in partial_hit:
+            for addon in partial:
+                if f'cf:{addon}' in hit:
                     break
             else:
-                partial = [f'cf:{s}' for s in partial]
-                partial_hit_tmp.append(sorted(partial))
-        for partial in partial_hit_tmp:
-            if partial not in partial_hit:
-                partial_hit.append(partial)
-        return sorted(list(set(hit))), partial_hit, sorted(list(set(miss)))
+                partial_hit_parsed.append(partial)
+        partial_hit = partial_hit_parsed
+
+        partial_hit_parsed = []
+        for partial in partial_hit:
+            partial_hit_temp = {}
+            for addon in partial:
+                if addon in self.dirIndex['full']['cf']:
+                    directories = self.dirIndex['full']['cf'][addon]
+                    complete = True
+                else:
+                    directories = []
+                    complete = False
+                for directory in directories:
+                    if not os.path.isdir(self.path / directory):
+                        complete = False
+                        break
+                if complete:
+                    partial_hit_temp[addon] = len(directories)
+            if len(partial_hit_temp) > 0:
+                partial_hit_parsed_max = max(partial_hit_temp.items(), key=lambda x: x[1])
+                partial_hit_parsed_temp = []
+                for key, value in partial_hit_temp.items():
+                    if value == partial_hit_parsed_max[1]:
+                        partial_hit_parsed_temp.append(key)
+                partial_hit_parsed.append(partial_hit_parsed_temp)
+            else:
+                for addon in partial:
+                    if addon in self.dirIndex['full']['cf']:
+                        directories = self.dirIndex['full']['cf'][addon]
+                        for directory in directories:
+                            if os.path.isdir(self.path / directory):
+                                miss.append(directory)
+        miss = list(set(miss))
+        partial_hit_parsed.sort()
+        partial_hit = list(partial_hit_parsed for partial_hit_parsed, _ in itertools.groupby(partial_hit_parsed))
+
+        partial_hit_parsed = []
+        for addons in partial_hit:
+            if len(addons) == 1 and not self.check_if_installed(f'https://www.curseforge.com/wow/addons/{addons[0]}'):
+                hit.append(f'cf:{addons[0]}')
+            elif len(addons) > 1:
+                for addon in addons:
+                    if self.check_if_installed(f'https://www.curseforge.com/wow/addons/{addon}'):
+                        break
+                else:
+                    addons = ['cf:' + s for s in addons]
+                    partial_hit_parsed.append(addons)
+
+        return sorted(hit), sorted(partial_hit_parsed), sorted(miss)
 
     def export_addons(self):
         addons = []
@@ -591,3 +660,42 @@ class Core:
                 url = addon['URL'].lower()
             addons.append(url)
         return f'install {",".join(sorted(addons))}'
+
+
+class DependenciesParser:
+    def __init__(self, core):
+        self.core = core
+        self.dependencies = []
+        self.ignore = [14328, 15049]
+
+    def add_dependency(self, dependency):
+        if dependency:
+            self.dependencies = self.dependencies + dependency
+
+    def parse_dependency(self, output=False):
+        self.dependencies = list(set(self.dependencies))
+        for ignore in self.ignore:
+            if ignore in self.dependencies:
+                self.dependencies.remove(ignore)
+        slugs = []
+        processed = []
+        for d in self.dependencies:
+            slug = self.core.parse_cf_id(d, reverse=True)
+            if slug:
+                slugs.append(f'https://www.curseforge.com/wow/addons/{slug}')
+        if output:
+            for s in slugs:
+                installed = self.core.check_if_installed(s)
+                if installed:
+                    processed.append(installed['Name'])
+                else:
+                    processed.append(f'cf:{s}')
+            return sorted(processed)
+        else:
+            for s in slugs:
+                if not self.core.check_if_installed(s):
+                    processed.append(s)
+            if len(processed) > 0:
+                return ','.join(processed)
+            else:
+                return None

@@ -114,7 +114,8 @@ class WagoUpdater:
         output = [[], []]
         if len(addon.list) > 0:
             payload = requests.get(f'https://data.wago.io/api/check/{addon.api}?ids={",".join(addon.list.keys())}',
-                                   headers={'api-key': self.apiKey, 'User-Agent': HEADERS['User-Agent']}).json()
+                                   headers={'api-key': self.apiKey, 'User-Agent': HEADERS['User-Agent']},
+                                   timeout=5).json()
             if 'error' in payload or 'msg' in payload:
                 raise RuntimeError
             for entry in payload:
@@ -143,7 +144,7 @@ class WagoUpdater:
     @retry('Failed to parse Wago data.')
     def update_entry(self, entry, addon):
         raw = requests.get(f'https://data.wago.io/api/raw/encoded?id={entry["slug"]}',
-                           headers={'api-key': self.apiKey, 'User-Agent': HEADERS['User-Agent']}).text
+                           headers={'api-key': self.apiKey, 'User-Agent': HEADERS['User-Agent']}, timeout=5).text
         slug = f'    ["{entry["slug"]}"] = {{\n      name = [=[{entry["name"]}]=],\n      author = [=[' \
                f'{entry["username"]}]=],\n      encoded = [=[{raw}]=],\n      wagoVersion = [=[' \
                f'{entry["version"]}]=],\n      wagoSemver = [=[{entry["versionString"]}]=],\n      ' \
@@ -183,8 +184,8 @@ class WagoUpdater:
         if not os.path.isdir(Path('Interface/AddOns/WeakAurasCompanion')) or force:
             Path('Interface/AddOns/WeakAurasCompanion').mkdir(exist_ok=True)
             with open(Path('Interface/AddOns/WeakAurasCompanion/WeakAurasCompanion.toc'), 'w', newline='\n') as out:
-                out.write(f'## Interface: {"11305" if client_type == "wow_classic" else "80300"}\n## Title: WeakAu'
-                          f'ras Companion\n## Author: The WeakAuras Team\n## Version: 1.1.0\n## Notes: Keep your WeakAu'
+                out.write(f'## Interface: {"11305" if client_type == "wow_classic" else "90001"}\n## Title: WeakAu'
+                          f'ras Companion\n## Author: The WeakAuras Team\n## Version: 1.1.1\n## Notes: Keep your WeakAu'
                           f'ras updated!\n## X-Category: Interface Enhancements\n## DefaultState: Enabled\n## LoadOnDem'
                           f'and: 0\n## OptionalDeps: WeakAuras, Plater\n\ndata.lua\ninit.lua')
             with open(Path('Interface/AddOns/WeakAurasCompanion/init.lua'), 'w', newline='\n') as out:

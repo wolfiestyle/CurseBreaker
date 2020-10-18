@@ -9,7 +9,7 @@ class GitHubAddon:
     @retry()
     def __init__(self, url, clienttype):
         project = url.replace('https://github.com/', '')
-        self.payload = requests.get(f'https://api.github.com/repos/{project}/releases', headers=HEADERS)
+        self.payload = requests.get(f'https://api.github.com/repos/{project}/releases', headers=HEADERS, timeout=5)
         if self.payload.status_code == 404:
             raise RuntimeError(url)
         else:
@@ -24,10 +24,13 @@ class GitHubAddon:
         self.name = project.split('/')[1]
         self.clientType = clienttype
         self.currentVersion = self.payload['tag_name'] or self.payload['name']
+        self.uiVersion = None
         self.downloadUrl = None
         self.changelogUrl = self.payload['html_url']
         self.archive = None
+        self.dependencies = None
         self.directories = []
+        self.author = [project.split('/')[0]]
         self.get_latest_package()
 
     def get_latest_package(self):
@@ -50,7 +53,7 @@ class GitHubAddon:
 
     @retry()
     def get_addon(self):
-        self.archive = zipfile.ZipFile(io.BytesIO(requests.get(self.downloadUrl, headers=HEADERS).content))
+        self.archive = zipfile.ZipFile(io.BytesIO(requests.get(self.downloadUrl, headers=HEADERS, timeout=5).content))
         for file in self.archive.namelist():
             if file.lower().endswith('.toc') and '/' not in file:
                 raise RuntimeError(f'{self.name}.\nProject package is corrupted or incorrectly packaged.')
