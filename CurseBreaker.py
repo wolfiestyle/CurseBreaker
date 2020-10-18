@@ -255,7 +255,6 @@ class TUI:
                                                         traceback=e.__traceback__, width=width))
 
     def print_header(self):
-        clear()
         if self.headless:
             self.console.print(f'[bold green]CurseBreaker[/bold green] [bold red]v{__version__}[/bold red] | '
                                f'[yellow]{datetime.now()}[/yellow]', highlight=False)
