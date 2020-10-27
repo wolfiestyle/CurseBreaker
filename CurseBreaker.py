@@ -14,6 +14,7 @@ import platform
 import pyperclip
 import subprocess
 from csv import reader
+from shlex import split, quote
 from pathlib import Path
 from datetime import datetime
 from rich import box
@@ -62,6 +63,7 @@ class TUI:
             self.headless = True
         self.setup_console()
         self.print_header()
+        self.core.init_master_config()
         # Check if executable is in good location
         if not glob.glob('World*.app') and not glob.glob('Wow*.exe') or \
                 not os.path.isdir(Path('Interface/AddOns')) or not os.path.isdir('WTF'):
@@ -356,8 +358,9 @@ class TUI:
             authors = f' [bold black]by {", ".join(authors)}[/bold black]'
         else:
             authors = ''
-        if uiversion and uiversion not in [self.core.currentRetailVersion, self.core.currentClassicVersion]:
-            uiversion = ' [bold yellow][!][bold yellow]'
+        if uiversion and uiversion not in [self.core.masterConfig['RetailVersion'],
+                                           self.core.masterConfig['ClassicVersion']]:
+            uiversion = ' [bold yellow][!][/bold yellow]'
         else:
             uiversion = ''
         if link:
@@ -369,11 +372,11 @@ class TUI:
 
     def c_install(self, args, recursion=False):
         if args:
-            if args.startswith('-i '):
-                args = args[3:]
+            optignore = False
+            pargs = split(quote(args))
+            if '-i' in pargs:
                 optignore = True
-            else:
-                optignore = False
+                args = args.replace('-i', '', 1)
             dependencies = DependenciesParser(self.core)
             args = re.sub(r'([a-zA-Z0-9_:])([ ]+)([a-zA-Z0-9_:])', r'\1,\3', args)
             addons = [addon.strip() for addon in list(reader([args], skipinitialspace=True))[0]]
@@ -412,11 +415,11 @@ class TUI:
 
     def c_uninstall(self, args):
         if args:
-            if args.startswith('-k '):
-                args = args[3:]
+            optkeep = False
+            pargs = split(quote(args))
+            if '-k' in pargs:
                 optkeep = True
-            else:
-                optkeep = False
+                args = args.replace('-k', '', 1)
             addons = self.parse_args(args)
             with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|',
                           auto_refresh=False, console=self.console) as progress:
@@ -437,7 +440,8 @@ class TUI:
                                'full links as an argument.\n\t[bold white]Flags:[/bold white]\n\t\t[bold white]-k[/bold'
                                ' white] - Keep the addon files after uninstalling.', highlight=False)
 
-    def c_update(self, args, addline=False, update=True, force=False, provider=False):
+    def c_update(self, args, addline=False, update=True, force=False, provider=False, reversecompact=False):
+        compact = not self.core.config['CompactMode'] if reversecompact else self.core.config['CompactMode']
         if len(self.core.cfCache) > 0 or len(self.core.wowiCache) > 0:
             self.core.cfCache = {}
             self.core.wowiCache = {}
@@ -475,7 +479,7 @@ class TUI:
                                                        self.parse_link(versionold, changelog, dstate,
                                                                        uiversion=uiversion))
                                 else:
-                                    if self.core.config['CompactMode'] and compacted > -1:
+                                    if compact and compacted > -1:
                                         compacted += 1
                                     else:
                                         self.table.add_row(f'[green]Up-to-date[/green]{source}',
@@ -529,12 +533,18 @@ class TUI:
                 self.c_update(False, False, True, True)
 
     def c_status(self, args):
-        if args and args.startswith('-s'):
-            args = args[2:]
-            optsource = True
-        else:
-            optsource = False
-        self.c_update(args, False, False, False, optsource)
+        optsource = False
+        optcompact = False
+        if args:
+            pargs = split(quote(args))
+            if '-s' in pargs:
+                optsource = True
+                args = args.replace('-s', '', 1)
+            if '-a' in pargs:
+                optcompact = True
+                args = args.replace('-a', '', 1)
+            args = args.strip()
+        self.c_update(args, False, False, False, optsource, optcompact)
 
     def c_orphans(self, _):
         orphansd, orphansf = self.core.find_orphans()
@@ -678,6 +688,8 @@ class TUI:
     def c_wago_update(self, _, verbose=True):
         if os.path.isdir(Path('Interface/AddOns/WeakAuras')) or os.path.isdir(Path('Interface/AddOns/Plater')):
             accounts = self.core.detect_accounts()
+            if self.core.config['WAAccountName'] != '' and self.core.config['WAAccountName'] not in accounts:
+                self.core.config['WAAccountName'] = ''
             if len(accounts) == 0:
                 return
             elif len(accounts) > 1 and self.core.config['WAAccountName'] == '':
@@ -691,10 +703,9 @@ class TUI:
             elif len(accounts) == 1 and self.core.config['WAAccountName'] == '':
                 self.core.config['WAAccountName'] = accounts[0]
                 self.core.save_config()
-            wago = WagoUpdater(self.core.config['WAUsername'], self.core.config['WAAccountName'],
-                               self.core.config['WAAPIKey'])
-            if self.core.wagoCompanionVersion != self.core.config['WACompanionVersion']:
-                self.core.config['WACompanionVersion'] = self.core.wagoCompanionVersion
+            wago = WagoUpdater(self.core.config, self.core.masterConfig)
+            if self.core.masterConfig['WagoVersion'] != self.core.config['WACompanionVersion']:
+                self.core.config['WACompanionVersion'] = self.core.masterConfig['WagoVersion']
                 self.core.save_config()
                 force = True
             else:
@@ -802,8 +813,11 @@ class TUI:
                            'urrent state.\n\tIf no argument is provided all addons will be forcefully updated.\n'
                            '[green]wago_update[/green]\n\tCommand detects all installed WeakAuras and Plater profiles/s'
                            'cripts.\n\tAnd then generate WeakAuras Companion payload.\n'
-                           '[green]status[/green]\n\tPrints the current state of all installed addons.\n\t[bold white]F'
-                           'lags:[/bold white]\n\t\t[bold white]-s[/bold white] - Display the source of the addons.\n'
+                           '[green]status[/green]\n\tPrints the current state of all installed addons.\n\t[bold yellow]'
+                           '[!][/bold yellow] mark means that the latest release is not updated yet for the current WoW'
+                           ' version.\n\t[bold white]Flags:[/bold white]\n\t\t[bold white]-a[/bold white] - Temporary r'
+                           'everse the table compacting option.\n\t\t[bold white]-s[/bold white] - Display the source o'
+                           'f the addons.\n'
                            '[green]orphans[/green]\n\tPrints list of orphaned directories and files.\n'
                            '[green]search [Keyword][/green]\n\tExecutes addon search on CurseForge.\n'
                            '[green]recommendations[/green]\n\tCheck the list of currently installed addons against a co'
