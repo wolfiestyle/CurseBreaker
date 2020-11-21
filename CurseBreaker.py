@@ -152,7 +152,7 @@ class TUI:
                 else:
                     self.console.print('Press [bold]I[/bold] to enter interactive mode or any other button to close'
                                        ' the application.')
-                    keypress = self.handle_keypress(0)
+                    keypress = self.handle_keypress(2)
                     if keypress and keypress.lower() == b'i':
                         pass
                     else:
