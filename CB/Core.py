@@ -197,9 +197,9 @@ class Core:
             return GitHubAddon(url, self.clientType)
         elif url.lower() == 'elvui':
             if self.clientType == 'wow_retail':
-                return GitLabAddon('ElvUI', '60', 'elvui/elvui', 'master')
+                return TukuiAddon('ElvUI', False, 'elvui')
             else:
-                return GitLabAddon('ElvUI', '492', 'elvui/elvui-classic', 'master')
+                return TukuiAddon('2', True)
         elif url.lower() == 'elvui:dev':
             if self.clientType == 'wow_retail':
                 return GitLabAddon('ElvUI', '60', 'elvui/elvui', 'development')
@@ -207,9 +207,9 @@ class Core:
                 return GitLabAddon('ElvUI', '492', 'elvui/elvui-classic', 'development')
         elif url.lower() == 'tukui':
             if self.clientType == 'wow_retail':
-                return GitLabAddon('Tukui', '77', 'Tukz/Tukui', 'master')
+                return TukuiAddon('Tukui', False, 'tukui')
             else:
-                return GitLabAddon('Tukui', '77', 'Tukz/Tukui', 'Classic')
+                return TukuiAddon('1', True)
         elif url.lower() == 'shadow&light:dev':
             if self.clientType == 'wow_retail':
                 return GitLabAddon('ElvUI Shadow & Light', '45', 'shadow-and-light/shadow-and-light', 'dev')
@@ -242,6 +242,8 @@ class Core:
             raise NotImplementedError('Provided URL is not supported.')
         elif 'twitch://' in url:
             url = url.split('/download-client')[0].replace('twitch://', 'https://').strip()
+        elif 'curseforge://' in url:
+            url = self.parse_cf_payload(url.strip(), False)
         elif url.startswith('cf:'):
             url = f'https://www.curseforge.com/wow/addons/{url[3:]}'
         elif url.startswith('wowi:'):
@@ -469,7 +471,12 @@ class Core:
                           'KEY_CURRENT_USER\Software\Classes\\twitch\DefaultIcon]\n@="\\"CurseBreaker.exe,1\\""\n[HKEY_'
                           'CURRENT_USER\Software\Classes\\twitch\shell]\n[HKEY_CURRENT_USER\Software\Classes\\twitch\sh'
                           'ell\open]\n[HKEY_CURRENT_USER\Software\Classes\\twitch\shell\open\command]\n@="\\"'
-                          + os.path.abspath(sys.executable).replace('\\', '\\\\') + '\\" \\"%1\\""')
+                          + os.path.abspath(sys.executable).replace('\\', '\\\\') + '\\" \\"%1\\""\n[HKEY_CURRENT_USER'
+                          '\Software\Classes\\curseforge]\n"URL Protocol"="\\"\\""\n@="\\"URL:CurseBreaker Protocol\\"'
+                          '"\n[HKEY_CURRENT_USER\Software\Classes\\curseforge\DefaultIcon]\n@="\\"CurseBreaker.exe,1\\'
+                          '""\n[HKEY_CURRENT_USER\Software\Classes\\curseforge\shell]\n[HKEY_CURRENT_USER\Software\Cla'
+                          'sses\\curseforge\shell\open]\n[HKEY_CURRENT_USER\Software\Classes\\curseforge\shell\open\co'
+                          'mmand]\n@="\\"' + os.path.abspath(sys.executable).replace('\\', '\\\\') + '\\" \\"%1\\""')
 
     @retry()
     def parse_cf_id(self, url, bulk=False, reverse=False):
@@ -516,10 +523,13 @@ class Core:
             self.save_config()
         return project
 
-    @retry(custom_error='Failed to parse the XML file.')
-    def parse_cf_xml(self, path):
-        xml = parse(path)
-        project = xml.childNodes[0].getElementsByTagName('project')[0].getAttribute('id')
+    @retry(custom_error='Failed to parse the URI.')
+    def parse_cf_payload(self, path, xml=True):
+        if xml:
+            xml = parse(path)
+            project = xml.childNodes[0].getElementsByTagName('project')[0].getAttribute('id')
+        else:
+            project = re.search(r'\d+', path).group()
         payload = requests.get(f'https://addons-ecs.forgesvc.net/api/v2/addon/{project}', headers=HEADERS,
                                timeout=5).json()
         url = payload['websiteUrl'].strip()
@@ -542,8 +552,9 @@ class Core:
         if len(ids_wowi) > 0:
             payload = requests.get(f'https://api.mmoui.com/v3/game/WOW/filedetails/{",".join(ids_wowi)}.json',
                                    headers=HEADERS, timeout=5).json()
-            for addon in payload:
-                self.wowiCache[str(addon['UID'])] = addon
+            if 'ERROR' not in payload:
+                for addon in payload:
+                    self.wowiCache[str(addon['UID'])] = addon
 
     def detect_accounts(self):
         if os.path.isdir(Path('WTF/Account')):

@@ -14,7 +14,7 @@ import platform
 import pyperclip
 import subprocess
 from csv import reader
-from shlex import split, quote
+from shlex import split
 from pathlib import Path
 from datetime import datetime
 from rich import box
@@ -92,8 +92,8 @@ class TUI:
                                '[/bold red]\n')
             sys.exit(1)
         self.setup_table()
-        # Curse URI Support
-        if len(sys.argv) == 2 and 'twitch://' in sys.argv[1]:
+        # CurseForge URI Support
+        if len(sys.argv) == 2 and any(x in sys.argv[1] for x in ['twitch://', 'curseforge://']):
             try:
                 self.c_install(sys.argv[1].strip())
             except Exception as e:
@@ -103,7 +103,7 @@ class TUI:
         if len(sys.argv) == 2 and '.ccip' in sys.argv[1]:
             try:
                 path = sys.argv[1].strip()
-                self.c_install(self.core.parse_cf_xml(path))
+                self.c_install(self.core.parse_cf_payload(path))
                 if os.path.exists(path):
                     os.remove(path)
             except Exception as e:
@@ -129,18 +129,7 @@ class TUI:
             if not self.headless:
                 self.console.print('Automatic update of all addons will start in 5 seconds.\n'
                                    'Press any button to enter interactive mode.', highlight=False)
-            kb = KBHit()
-            starttime = time.time()
-            keypress = None
-            while True:
-                if self.headless:
-                    break
-                elif kb.kbhit():
-                    keypress = kb.getch()
-                    break
-                elif time.time() - starttime > 5:
-                    break
-            kb.set_normal_term()
+            keypress = self.handle_keypress(5)
             if not keypress:
                 if not self.headless:
                     self.print_header()
@@ -158,7 +147,16 @@ class TUI:
                     self.handle_exception(e)
                 self.console.print('')
                 self.print_log()
-                sys.exit(0)
+                if self.headless:
+                    sys.exit(0)
+                else:
+                    self.console.print('Press [bold]I[/bold] to enter interactive mode or any other button to close'
+                                       ' the application.')
+                    keypress = self.handle_keypress(0)
+                    if keypress and keypress.lower() == b'i':
+                        pass
+                    else:
+                        sys.exit(0)
         if self.headless:
             sys.exit(1)
         self.setup_completer()
@@ -169,6 +167,10 @@ class TUI:
         if len(self.core.config['Addons']) == 0:
             self.console.print('Command [green]import[/green] might be used to detect already installed addons.\n')
         self.motd_parser()
+        if self.core.backup_check():
+            self.console.print(f'[green]Backing up WTF directory:[/green]')
+            self.core.backup_wtf(self.console)
+            self.console.print('')
         # Prompt session
         while True:
             try:
@@ -255,6 +257,24 @@ class TUI:
         else:
             self.console.print(Traceback.from_exception(exc_type=e.__class__, exc_value=e,
                                                         traceback=e.__traceback__, width=width))
+
+    def handle_keypress(self, wait):
+        if not self.headless:
+            kb = KBHit()
+        starttime = time.time()
+        keypress = None
+        while True:
+            # noinspection PyUnboundLocalVariable
+            if self.headless:
+                break
+            elif kb.kbhit():
+                keypress = kb.getch()
+                break
+            elif wait and time.time() - starttime > wait:
+                break
+        if not self.headless:
+            kb.set_normal_term()
+        return keypress
 
     def print_header(self):
         if self.headless:
@@ -373,7 +393,7 @@ class TUI:
     def c_install(self, args, recursion=False):
         if args:
             optignore = False
-            pargs = split(quote(args))
+            pargs = split(args.replace("'", "\\'"))
             if '-i' in pargs:
                 optignore = True
                 args = args.replace('-i', '', 1)
@@ -416,7 +436,7 @@ class TUI:
     def c_uninstall(self, args):
         if args:
             optkeep = False
-            pargs = split(quote(args))
+            pargs = split(args.replace("'", "\\'"))
             if '-k' in pargs:
                 optkeep = True
                 args = args.replace('-k', '', 1)
@@ -536,7 +556,7 @@ class TUI:
         optsource = False
         optcompact = False
         if args:
-            pargs = split(quote(args))
+            pargs = split(args.replace("'", "\\'"))
             if '-s' in pargs:
                 optsource = True
                 args = args.replace('-s', '', 1)
