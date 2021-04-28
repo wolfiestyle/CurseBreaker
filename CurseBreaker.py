@@ -17,12 +17,14 @@ from csv import reader
 from shlex import split
 from pathlib import Path
 from datetime import datetime
+from contextlib import nullcontext
 from rich import box
 from rich.text import Text
 from rich.rule import Rule
 from rich.table import Table
 from rich.panel import Panel
 from rich.console import Console
+from rich.control import Control
 from rich.progress import Progress, BarColumn
 from rich.traceback import Traceback, install
 from multiprocessing import freeze_support
@@ -52,7 +54,6 @@ class TUI:
         self.console = None
         self.table = None
         self.slugs = None
-        self.tipsDatabase = None
         self.completer = None
         self.os = platform.system()
         install()
@@ -72,7 +73,7 @@ class TUI:
                                'this WoW installation was started at least once.[/bold red]\n')
             sys.exit(1)
         # Detect Classic client
-        if os.path.basename(os.getcwd()) == '_classic_':
+        if os.path.basename(os.getcwd()) in {'_classic_', '_classic_beta_', '_classic_ptr_'}:
             self.core.clientType = 'wow_classic'
             set_terminal_title(f'CurseBreaker v{__version__} - Classic')
         # Check if client have write access
@@ -93,7 +94,7 @@ class TUI:
             sys.exit(1)
         self.setup_table()
         # CurseForge URI Support
-        if len(sys.argv) == 2 and any(x in sys.argv[1] for x in ['twitch://', 'curseforge://']):
+        if len(sys.argv) == 2 and any(x in sys.argv[1] for x in {'twitch://', 'curseforge://'}):
             try:
                 self.c_install(sys.argv[1].strip())
             except Exception as e:
@@ -141,8 +142,10 @@ class TUI:
                         self.console.print(f'\n[green]Backing up WTF directory{"!" if self.headless else ":"}[/green]')
                         self.core.backup_wtf(None if self.headless else self.console)
                     if self.core.config['WAUsername'] != 'DISABLED':
-                        self.setup_table()
-                        self.c_wago_update(None, False)
+                        self.console.print('')
+                        with nullcontext() if self.headless else self.console.status("Processing Wago data"):
+                            self.setup_table()
+                            self.c_wago_update(None, False)
                 except Exception as e:
                     self.handle_exception(e)
                 self.console.print('')
@@ -153,7 +156,7 @@ class TUI:
                     self.console.print('Press [bold]I[/bold] to enter interactive mode or any other button to close'
                                        ' the application.')
                     keypress = self.handle_keypress(2)
-                    if keypress and keypress.lower() == b'i':
+                    if keypress and keypress.lower() in [b'i', 'i']:
                         pass
                     else:
                         sys.exit(0)
@@ -232,6 +235,8 @@ class TUI:
                         subprocess.call([sys.executable] + sys.argv[1:])
                         sys.exit(0)
             except Exception as e:
+                if os.path.isfile(sys.executable + '.old'):
+                    shutil.move(sys.executable + '.old', sys.executable)
                 self.console.print(f'[bold red]Update failed!\n\nReason: {str(e)}[/bold red]\n')
                 self.print_log()
                 sys.exit(1)
@@ -272,6 +277,7 @@ class TUI:
                 break
             elif wait and time.time() - starttime > wait:
                 break
+            time.sleep(0.01)
         if not self.headless:
             kb.set_normal_term()
         return keypress
@@ -321,7 +327,9 @@ class TUI:
             slugs.append(f'cf:{item}')
         for item in self.slugs['wowi']:
             slugs.append(f'wowi:{item}')
-        slugs.extend(['ElvUI:Dev', 'Shadow&Light:Dev'])
+        for item in self.slugs['ty']:
+            slugs.append(f'ty:{item}')
+        slugs.extend(['ElvUI:Dev', 'Tukui:Dev', 'Shadow&Light:Dev'])
         accounts = []
         for account in self.core.detect_accounts():
             accounts.append(account)
@@ -334,7 +342,7 @@ class TUI:
             'status': WordCompleter(addons, ignore_case=True),
             'orphans': None,
             'search': None,
-            'recommendations': None,
+            'backup': None,
             'import': {'install': None},
             'export': None,
             'toggle': {'authors': None,
@@ -393,45 +401,58 @@ class TUI:
     def c_install(self, args, recursion=False):
         if args:
             optignore = False
+            optnodeps = False
             pargs = split(args.replace("'", "\\'"))
             if '-i' in pargs:
                 optignore = True
                 args = args.replace('-i', '', 1)
+            if '-d' in pargs:
+                optnodeps = True
+                args = args.replace('-d', '', 1)
             dependencies = DependenciesParser(self.core)
             args = re.sub(r'([a-zA-Z0-9_:])([ ]+)([a-zA-Z0-9_:])', r'\1,\3', args)
             addons = [addon.strip() for addon in list(reader([args], skipinitialspace=True))[0]]
-            with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|',
-                          auto_refresh=False, console=self.console) as progress:
-                task = progress.add_task('', total=len(addons))
-                while not progress.finished:
-                    for addon in addons:
-                        installed, name, version, deps = self.core.add_addon(addon, optignore)
-                        if installed:
-                            self.table.add_row('[green]Installed[/green]', Text(name, no_wrap=True),
-                                               Text(version, no_wrap=True))
-                            if not recursion:
-                                dependencies.add_dependency(deps)
-                        else:
-                            self.table.add_row('[bold black]Already installed[/bold black]',
-                                               Text(name, no_wrap=True), Text(version, no_wrap=True))
-                        progress.update(task, advance=1, refresh=True)
-            self.console.print(self.table)
+            exceptions = []
+            if len(addons) > 0:
+                with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|',
+                              auto_refresh=False, console=self.console) as progress:
+                    task = progress.add_task('', total=len(addons))
+                    while not progress.finished:
+                        for addon in addons:
+                            try:
+                                installed, name, version, deps = self.core.add_addon(addon, optignore, optnodeps)
+                                if installed:
+                                    self.table.add_row('[green]Installed[/green]', Text(name, no_wrap=True),
+                                                       Text(version, no_wrap=True))
+                                    if not recursion:
+                                        dependencies.add_dependency(deps)
+                                else:
+                                    self.table.add_row('[bold black]Already installed[/bold black]',
+                                                       Text(name, no_wrap=True), Text(version, no_wrap=True))
+                            except Exception as e:
+                                exceptions.append(e)
+                            progress.update(task, advance=1, refresh=True)
+                self.console.print(self.table)
             dependencies = dependencies.parse_dependency()
             if dependencies:
                 self.setup_table()
                 self.console.print('Installing dependencies:')
                 self.c_install(dependencies, recursion=True)
+            if len(exceptions) > 0:
+                self.handle_exception(exceptions, False)
         else:
             self.console.print('[green]Usage:[/green]\n\tThis command accepts a space-separated list of links as an arg'
-                               'ument.[bold white]\n\tFlags:[/bold white]\n\t\t[bold white]-i[/bold white] - Disable th'
-                               'e client version check.\n[bold green]Supported URL:[/bold green]\n\thttps://www.cursefo'
-                               'rge.com/wow/addons/\[addon_name] [bold white]|[/bold white] cf:\[addon_name]\n\thttps:/'
-                               '/www.wowinterface.com/downloads/\[addon_name] [bold white]|[/bold white] wowi:\[addon_i'
-                               'd]\n\thttps://www.tukui.org/addons.php?id=\[addon_id] [bold white]|[/bold white] tu:\[a'
-                               'ddon_id]\n\thttps://www.tukui.org/classic-addons.php?id=\[addon_id] [bold white]|[/bold'
-                               ' white] tuc:\[addon_id]\n\thttps://github.com/\[username]/\[repository_name] [bold whit'
-                               'e]|[/bold white] gh:\[username]/\[repository_name]\n\tElvUI [bold white]|[/bold white] '
-                               'ElvUI:Dev\n\tTukui\n\tShadow&Light:Dev', highlight=False)
+                               'ument.[bold white]\n\tFlags:[/bold white]\n\t\t[bold white]-d[/bold white] - Disable de'
+                               'pendency parser.\n\t\t[bold white]-i[/bold white] - Disable the client version check.\n'
+                               '[bold green]Supported URL:[/bold green]\n\thttps://www.curseforge.com/wow/addons/\[addo'
+                               'n_name] [bold white]|[/bold white] cf:\[addon_name]\n\thttps://www.wowinterface.com/dow'
+                               'nloads/\[addon_name] [bold white]|[/bold white] wowi:\[addon_id]\n\thttps://www.tukui.o'
+                               'rg/addons.php?id=\[addon_id] [bold white]|[/bold white] tu:\[addon_id]\n\thttps://www.t'
+                               'ukui.org/classic-addons.php?id=\[addon_id] [bold white]|[/bold white] tuc:\[addon_id]\n'
+                               '\thttps://www.townlong-yak.com/addons/\[addon_name] [bold white]|[/bold white] ty:\[add'
+                               'on_name]\n\thttps://github.com/\[username]/\[repository_name] [bold white]|[/bold white'
+                               '] gh:\[username]/\[repository_name]\n\tElvUI [bold white]|[/bold white] ElvUI:Dev\n\tTu'
+                               'kui [bold white]|[/bold white] Tukui:Dev\n\tShadow&Light:Dev', highlight=False)
 
     def c_uninstall(self, args):
         if args:
@@ -441,20 +462,21 @@ class TUI:
                 optkeep = True
                 args = args.replace('-k', '', 1)
             addons = self.parse_args(args)
-            with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|',
-                          auto_refresh=False, console=self.console) as progress:
-                task = progress.add_task('', total=len(addons))
-                while not progress.finished:
-                    for addon in addons:
-                        name, version = self.core.del_addon(addon, optkeep)
-                        if name:
-                            self.table.add_row(f'[bold red]Uninstalled[/bold red]',
-                                               Text(name, no_wrap=True), Text(version, no_wrap=True))
-                        else:
-                            self.table.add_row(f'[bold black]Not installed[/bold black]',
-                                               Text(addon, no_wrap=True), Text('', no_wrap=True))
-                        progress.update(task, advance=1, refresh=True)
-            self.console.print(self.table)
+            if len(addons) > 0:
+                with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|',
+                              auto_refresh=False, console=self.console) as progress:
+                    task = progress.add_task('', total=len(addons))
+                    while not progress.finished:
+                        for addon in addons:
+                            name, version = self.core.del_addon(addon, optkeep)
+                            if name:
+                                self.table.add_row(f'[bold red]Uninstalled[/bold red]',
+                                                   Text(name, no_wrap=True), Text(version, no_wrap=True))
+                            else:
+                                self.table.add_row(f'[bold black]Not installed[/bold black]',
+                                                   Text(addon, no_wrap=True), Text('', no_wrap=True))
+                            progress.update(task, advance=1, refresh=True)
+                self.console.print(self.table)
         else:
             self.console.print('[green]Usage:[/green]\n\tThis command accepts a space-separated list of addon names or '
                                'full links as an argument.\n\t[bold white]Flags:[/bold white]\n\t\t[bold white]-k[/bold'
@@ -462,10 +484,6 @@ class TUI:
 
     def c_update(self, args, addline=False, update=True, force=False, provider=False, reversecompact=False):
         compact = not self.core.config['CompactMode'] if reversecompact else self.core.config['CompactMode']
-        if len(self.core.cfCache) > 0 or len(self.core.wowiCache) > 0:
-            self.core.cfCache = {}
-            self.core.wowiCache = {}
-            self.core.checksumCache = {}
         if args:
             addons = self.parse_args(args)
             compacted = -1
@@ -474,71 +492,76 @@ class TUI:
             compacted = 0
         exceptions = []
         dependencies = DependenciesParser(self.core)
-        with Progress('{task.completed:.0f}/{task.total}', '|', BarColumn(bar_width=None), '|',
-                      auto_refresh=False, console=None if self.headless else self.console) as progress:
-            task = progress.add_task('', total=len(addons))
-            if not args:
-                self.core.bulk_check(addons)
-                self.core.bulk_check_checksum(addons, progress)
-            while not progress.finished:
-                for addon in addons:
+        if len(addons) > 0:
+            with Progress('{task.completed:.0f}/{task.total}', '|', BarColumn(bar_width=None), '|',
+                          auto_refresh=False, console=None if self.headless else self.console) as progress:
+                task = progress.add_task('', total=len(addons))
+                if not args:
                     try:
-                        name, authors, versionnew, versionold, uiversion, modified, blocked, source, sourceurl,\
-                            changelog, deps, dstate = self.core.update_addon(
-                                addon if isinstance(addon, str) else addon['URL'], update, force)
-                        dependencies.add_dependency(deps)
-                        if provider:
-                            source = f' [bold white]{source}[/bold white]'
-                        else:
-                            source = ''
-                        if versionold:
-                            if versionold == versionnew:
-                                if modified:
-                                    self.table.add_row(f'[bold red]Modified[/bold red]{source}',
-                                                       self.parse_link(name, sourceurl, authors=authors),
-                                                       self.parse_link(versionold, changelog, dstate,
-                                                                       uiversion=uiversion))
-                                else:
-                                    if compact and compacted > -1:
-                                        compacted += 1
-                                    else:
-                                        self.table.add_row(f'[green]Up-to-date[/green]{source}',
+                        self.core.bulk_check(addons)
+                    except RuntimeError:
+                        pass
+                    self.core.bulk_check_checksum(addons, progress)
+                while not progress.finished:
+                    for addon in addons:
+                        try:
+                            name, authors, versionnew, versionold, uiversion, modified, blocked, source, sourceurl,\
+                                changelog, deps, dstate = self.core.update_addon(
+                                    addon if isinstance(addon, str) else addon['URL'], update, force)
+                            dependencies.add_dependency(deps)
+                            if provider:
+                                source = f' [bold white]{source}[/bold white]'
+                            else:
+                                source = ''
+                            if versionold:
+                                if versionold == versionnew:
+                                    if modified:
+                                        self.table.add_row(f'[bold red]Modified[/bold red]{source}',
                                                            self.parse_link(name, sourceurl, authors=authors),
                                                            self.parse_link(versionold, changelog, dstate,
                                                                            uiversion=uiversion))
-                            else:
-                                if modified or blocked:
-                                    self.table.add_row(f'[bold red]Update suppressed[/bold red]{source}',
-                                                       self.parse_link(name, sourceurl, authors=authors),
-                                                       self.parse_link(versionold, changelog, dstate,
-                                                                       uiversion=uiversion))
+                                    else:
+                                        if compact and compacted > -1:
+                                            compacted += 1
+                                        else:
+                                            self.table.add_row(f'[green]Up-to-date[/green]{source}',
+                                                               self.parse_link(name, sourceurl, authors=authors),
+                                                               self.parse_link(versionold, changelog, dstate,
+                                                                               uiversion=uiversion))
                                 else:
-                                    version = self.parse_link(versionnew, changelog, dstate, uiversion=uiversion)
-                                    version.stylize('yellow')
-                                    self.table.add_row(
-                                        f'[yellow]{"Updated" if update else "Update available"}[/yellow]{source}',
-                                        self.parse_link(name, sourceurl, authors=authors),
-                                        version)
-                        else:
-                            self.table.add_row(f'[bold black]Not installed[/bold black]{source}',
-                                               Text(addon, no_wrap=True),
-                                               Text('', no_wrap=True))
-                    except Exception as e:
-                        exceptions.append(e)
-                    progress.update(task, advance=1 if args else 0.5, refresh=True)
-        if addline:
-            self.console.print('')
-        self.console.print(self.table)
-        dependencies = dependencies.parse_dependency()
-        if dependencies and update:
-            self.setup_table()
-            self.console.print('Installing dependencies:')
-            self.c_install(dependencies, recursion=True)
-        if compacted > 0:
-            self.console.print(f'Additionally [green]{compacted}[/green] addons are up-to-date.')
-        if len(addons) == 0:
-            self.console.print('Apparently there are no addons installed by CurseBreaker.\n'
-                               'Command [green]import[/green] might be used to detect already installed addons.')
+                                    if modified or blocked:
+                                        self.table.add_row(f'[bold red]Update suppressed[/bold red]{source}',
+                                                           self.parse_link(name, sourceurl, authors=authors),
+                                                           self.parse_link(versionold, changelog, dstate,
+                                                                           uiversion=uiversion))
+                                    else:
+                                        version = self.parse_link(versionnew, changelog, dstate, uiversion=uiversion)
+                                        version.stylize('yellow')
+                                        self.table.add_row(
+                                            f'[yellow]{"Updated" if update else "Update available"}[/yellow]{source}',
+                                            self.parse_link(name, sourceurl, authors=authors),
+                                            version)
+                            else:
+                                self.table.add_row(f'[bold black]Not installed[/bold black]{source}',
+                                                   Text(addon, no_wrap=True),
+                                                   Text('', no_wrap=True))
+                        except Exception as e:
+                            exceptions.append(e)
+                        progress.update(task, advance=1 if args else 0.5, refresh=True)
+            if addline:
+                self.console.print('')
+            self.console.print(self.table)
+            dependencies = dependencies.parse_dependency()
+            if dependencies and update:
+                self.setup_table()
+                self.console.print('Installing dependencies:')
+                self.c_install(dependencies, recursion=True)
+            if compacted > 0:
+                self.console.print(f'Additionally [green]{compacted}[/green] addons are up-to-date.')
+        else:
+            self.console.print('Apparently there are no addons installed by CurseBreaker (or you provided incorrect add'
+                               'on name).\nCommand [green]import[/green] might be used to detect already installed addo'
+                               'ns.', highlight=False)
         if len(exceptions) > 0:
             self.handle_exception(exceptions, False)
 
@@ -570,7 +593,7 @@ class TUI:
         orphansd, orphansf = self.core.find_orphans()
         self.console.print('[green]Directories that are not part of any installed addon:[/green]')
         for orphan in sorted(orphansd):
-            self.console.print(orphan.replace('[GIT]', '[yellow]\[GIT][/yellow]'), highlight=False)
+            self.console.print(orphan.replace('[GIT]', '[yellow][GIT][/yellow]'), highlight=False)
         self.console.print('\n[green]Files that are leftovers after no longer installed addons:[/green]')
         for orphan in sorted(orphansf):
             self.console.print(orphan, highlight=False)
@@ -696,7 +719,10 @@ class TUI:
         if args.startswith('dependencies'):
             addons = sorted(list(filter(lambda k: k['URL'].startswith('https://www.curseforge.com/wow/addons/'),
                                         self.core.config['Addons'])), key=lambda k: k['Name'].lower())
-            self.core.bulk_check(addons)
+            try:
+                self.core.bulk_check(addons)
+            except RuntimeError:
+                pass
             for addon in addons:
                 dependencies = DependenciesParser(self.core)
                 name, _, _, _, _, _, _, _, _, _, deps, _ = self.core.update_addon(addon['URL'], False, False)
@@ -750,6 +776,7 @@ class TUI:
                     for aura in statusplater[1]:
                         self.console.print(f'[link={aura[1]}]{aura[0]}[/link]', highlight=False)
             else:
+                self.console.control(Control.move(x=0, y=-1))
                 if len(statuswa[0]) > 0:
                     self.console.print(f'\n[green]The number of outdated WeakAuras:[/green] '
                                        f'{len(statuswa[0])}', highlight=False)
@@ -771,29 +798,8 @@ class TUI:
         else:
             self.console.print('[green]Usage:[/green]\n\tThis command accepts a search query as an argument.')
 
-    def c_recommendations(self, _):
-        if not self.tipsDatabase:
-            # noinspection PyBroadException
-            try:
-                self.tipsDatabase = pickle.load(gzip.open(io.BytesIO(
-                    requests.get('https://storage.googleapis.com/cursebreaker/recommendations.pickle.gz',
-                                 headers=HEADERS, timeout=5).content)))
-            except Exception:
-                self.tipsDatabase = {}
-        if len(self.tipsDatabase) > 0:
-            found = False
-            for tip in self.tipsDatabase:
-                breaker = False
-                for addon, data in tip['Addons'].items():
-                    check = True if self.core.check_if_installed(addon) else False
-                    breaker = check == data['Installed']
-                if breaker:
-                    found = True
-                    recomendation = tip["Recomendation"].replace('|n', '\n')
-                    self.console.print(f'[bold white underline]{tip["Title"]}[/bold white underline] by [green]'
-                                       f'{tip["Author"]}[/green]\n\n{recomendation}\n', highlight=False)
-            if not found:
-                self.console.print('Not found any recommendations for you. Good job!')
+    def c_backup(self, _):
+        self.core.backup_wtf(None if self.headless else self.console)
 
     def c_import(self, args):
         hit, partial_hit, miss = self.core.detect_addons()
@@ -821,8 +827,8 @@ class TUI:
 
     def c_help(self, _):
         self.console.print('[green]install [URL][/green]\n\tCommand accepts a space-separated list of links.\n\t[bold w'
-                           'hite]Flags:[/bold white]\n\t\t[bold white]-i[/bold white] - Disable the client version chec'
-                           'k.\n'
+                           'hite]Flags:[/bold white]\n\t\t[bold white]-d[/bold white] - Disable dependency parser.\n\t'
+                           '\t[bold white]-i[/bold white] - Disable the client version check.\n'
                            '[green]uninstall [URL/Name][/green]\n\tCommand accepts a space-separated list of addon name'
                            's or full links.\n\t[bold white]Flags:[/bold white]\n\t\t[bold white]-k[/bold white] - Keep'
                            ' the addon files after uninstalling.\n'
@@ -840,8 +846,7 @@ class TUI:
                            'f the addons.\n'
                            '[green]orphans[/green]\n\tPrints list of orphaned directories and files.\n'
                            '[green]search [Keyword][/green]\n\tExecutes addon search on CurseForge.\n'
-                           '[green]recommendations[/green]\n\tCheck the list of currently installed addons against a co'
-                           'mmunity-driven database of tips.\n'
+                           '[green]backup[/green]\n\tCommand creates a backup of WTF directory.\n'
                            '[green]import[/green]\n\tCommand attempts to import already installed addons.\n'
                            '[green]export[/green]\n\tCommand prints list of all installed addons in a form suitable f'
                            'or sharing.\n'
@@ -870,10 +875,11 @@ class TUI:
                            'name] [bold white]|[/bold white] cf:\[addon_name]\n\thttps://www.wowinterface.com/downloads'
                            '/\[addon_name] [bold white]|[/bold white] wowi:\[addon_id]\n\thttps://www.tukui.org/addons.'
                            'php?id=\[addon_id] [bold white]|[/bold white] tu:\[addon_id]\n\thttps://www.tukui.org/class'
-                           'ic-addons.php?id=\[addon_id] [bold white]|[/bold white] tuc:\[addon_id]\n\thttps://github.c'
-                           'om/\[username]/\[repository_name] [bold white]|[/bold white] gh:\[username]/\[repository_na'
-                           'me]\n\tElvUI [bold white]|[/bold white] ElvUI:Dev\n\tTukui\n\tShadow&Light:Dev',
-                           highlight=False)
+                           'ic-addons.php?id=\[addon_id] [bold white]|[/bold white] tuc:\[addon_id]\n\thttps://www.town'
+                           'long-yak.com/addons/\[addon_name] [bold white]|[/bold white] ty:\[addon_name]\n\thttps://gi'
+                           'thub.com/\[username]/\[repository_name] [bold white]|[/bold white] gh:\[username]/\[reposit'
+                           'ory_name]\n\tElvUI [bold white]|[/bold white] ElvUI:Dev\n\tTukui [bold white]|[/bold white]'
+                           ' Tukui:Dev\n\tShadow&Light:Dev', highlight=False)
 
     def c_exit(self, _):
         sys.exit(0)

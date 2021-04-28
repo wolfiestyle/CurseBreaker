@@ -22,10 +22,11 @@ from rich.progress import Progress, BarColumn
 from xml.dom.minidom import parse, parseString
 from . import retry, HEADERS, __version__
 from .Tukui import TukuiAddon
-from .GitHub import GitHubAddon
+from .GitHub import GitHubAddon, GitHubAddonRaw
 from .GitLab import GitLabAddon
 from .CurseForge import CurseForgeAddon
 from .WoWInterface import WoWInterfaceAddon
+from .TownlongYak import TownlongYakAddon
 
 
 class Core:
@@ -40,6 +41,8 @@ class Core:
         self.dirIndex = None
         self.cfCache = {}
         self.wowiCache = {}
+        self.tukuiCache = None
+        self.townlongyakCache = None
         self.checksumCache = {}
         self.scraper = cloudscraper.create_scraper()
 
@@ -50,7 +53,8 @@ class Core:
                 requests.get('https://storage.googleapis.com/cursebreaker/config.pickle.gz',
                              headers=HEADERS, timeout=5).content)))
         except Exception:
-            raise RuntimeError('Failed to fetch the master config file.')
+            raise RuntimeError('Failed to fetch the master config file. '
+                               'Check your connectivity to Google Cloud.') from None
 
     def init_config(self):
         if os.path.isfile('CurseBreaker.json'):
@@ -64,6 +68,7 @@ class Core:
         else:
             self.config = {'Addons': [],
                            'IgnoreClientVersion': {},
+                           'IgnoreDependencies': {},
                            'Backup': {'Enabled': True, 'Number': 7},
                            'CFCacheCloudFlare': {},
                            'Version': __version__,
@@ -122,7 +127,8 @@ class Core:
                         ['3.1.10', 'CFCacheCloudFlare', {}],
                         ['3.7.0', 'CompactMode', False],
                         ['3.10.0', 'AutoUpdate', True],
-                        ['3.12.0', 'ShowAuthors', True]]:
+                        ['3.12.0', 'ShowAuthors', True],
+                        ['3.16.0', 'IgnoreDependencies', {}]]:
                 if add[1] not in self.config.keys():
                     self.config[add[1]] = add[2]
             for delete in [['1.3.0', 'URLCache'],
@@ -186,20 +192,30 @@ class Core:
         elif url.startswith('https://www.tukui.org/addons.php?id='):
             if self.clientType == 'wow_classic':
                 raise RuntimeError('Incorrect client version.')
-            return TukuiAddon(url, False)
+            self.bulk_tukui_check()
+            return TukuiAddon(url, self.tukuiCache)
         elif url.startswith('https://www.tukui.org/classic-addons.php?id='):
             if self.clientType == 'wow_retail':
                 raise RuntimeError('Incorrect client version.')
             elif url.endswith('1') or url.endswith('2'):
                 raise RuntimeError('ElvUI and Tukui cannot be installed this way.')
-            return TukuiAddon(url, True)
+            self.bulk_tukui_check()
+            return TukuiAddon(url, self.tukuiCache)
         elif url.startswith('https://github.com/'):
             return GitHubAddon(url, self.clientType)
+        elif url.startswith('https://www.townlong-yak.com/addons/'):
+            self.bulk_townlongyak_check()
+            if url in self.config['IgnoreClientVersion'].keys() or self.clientType == 'wow_retail':
+                clienttype = 'retail'
+            else:
+                clienttype = 'classic'
+            return TownlongYakAddon(url, self.townlongyakCache, clienttype)
         elif url.lower() == 'elvui':
             if self.clientType == 'wow_retail':
-                return TukuiAddon('ElvUI', False, 'elvui')
+                return TukuiAddon('ElvUI', self.tukuiCache, 'elvui')
             else:
-                return TukuiAddon('2', True)
+                self.bulk_tukui_check()
+                return TukuiAddon('2', self.tukuiCache)
         elif url.lower() == 'elvui:dev':
             if self.clientType == 'wow_retail':
                 return GitLabAddon('ElvUI', '60', 'elvui/elvui', 'development')
@@ -207,12 +223,18 @@ class Core:
                 return GitLabAddon('ElvUI', '492', 'elvui/elvui-classic', 'development')
         elif url.lower() == 'tukui':
             if self.clientType == 'wow_retail':
-                return TukuiAddon('Tukui', False, 'tukui')
+                return TukuiAddon('Tukui', self.tukuiCache, 'tukui')
             else:
-                return TukuiAddon('1', True)
+                self.bulk_tukui_check()
+                return TukuiAddon('1', self.tukuiCache)
+        elif url.lower() == 'tukui:dev':
+            if self.clientType == 'wow_retail':
+                return GitLabAddon('Tukui', '77', 'Tukz/Tukui', 'Retail')
+            else:
+                return GitLabAddon('Tukui', '77', 'Tukz/Tukui', 'Classic')
         elif url.lower() == 'shadow&light:dev':
             if self.clientType == 'wow_retail':
-                return GitLabAddon('ElvUI Shadow & Light', '45', 'shadow-and-light/shadow-and-light', 'dev')
+                return GitHubAddonRaw('Shadow-and-Light/shadow-and-light', 'dev', ['ElvUI_SLE'])
             else:
                 raise RuntimeError('Incorrect client version.')
         else:
@@ -234,10 +256,12 @@ class Core:
             return 'Tukui', 'https://www.curseforge.com/wow/addons/elvui-shadow-light'
         elif url.startswith('https://github.com/'):
             return 'GitHub', url
+        elif url.startswith('https://www.townlong-yak.com/addons/'):
+            return 'Townlong Yak', url
         else:
             return '?', None
 
-    def add_addon(self, url, ignore):
+    def add_addon(self, url, ignore, nodeps):
         if url.endswith(':'):
             raise NotImplementedError('Provided URL is not supported.')
         elif 'twitch://' in url:
@@ -254,12 +278,16 @@ class Core:
             url = f'https://www.tukui.org/classic-addons.php?id={url[4:]}'
         elif url.startswith('gh:'):
             url = f'https://github.com/{url[3:]}'
+        elif url.startswith('ty:'):
+            url = f'https://www.townlong-yak.com/addons/{url[3:]}'
         if url.endswith('/'):
             url = url[:-1]
         addon = self.check_if_installed(url)
         if not addon:
             if ignore:
                 self.config['IgnoreClientVersion'][url] = True
+            if nodeps:
+                self.config['IgnoreDependencies'][url] = True
             new = self.parse_url(url)
             new.get_addon()
             addon = self.check_if_installed_dirs(new.directories)
@@ -277,7 +305,8 @@ class Core:
                                           'Checksums': checksums
                                           })
             self.save_config()
-            return True, new.name, new.currentVersion, new.dependencies
+            return True, new.name, new.currentVersion, \
+                None if url in self.config['IgnoreDependencies'].keys() else new.dependencies
         return False, addon['Name'], addon['Version'], None
 
     def del_addon(self, url, keep):
@@ -286,6 +315,7 @@ class Core:
             if not keep:
                 self.cleanup(old['Directories'])
             self.config['IgnoreClientVersion'].pop(old['URL'], None)
+            self.config['IgnoreDependencies'].pop(old['URL'], None)
             self.config['Addons'][:] = [d for d in self.config['Addons'] if d.get('URL') != url
                                         and d.get('Name') != url]
             self.save_config()
@@ -304,6 +334,7 @@ class Core:
             else:
                 modified = self.check_checksum(old, False)
             blocked = self.check_if_blocked(old)
+            new.dependencies = None if url in self.config['IgnoreDependencies'].keys() else new.dependencies
             if force or (new.currentVersion != old['Version'] and update and not modified and not blocked):
                 new.get_addon()
                 self.cleanup(old['Directories'])
@@ -337,6 +368,7 @@ class Core:
         self.checksumCache[result[0]] = result[1]
 
     def bulk_check_checksum(self, addons, pbar):
+        self.checksumCache = {}
         with Pool(processes=min(60, os.cpu_count() or 1)) as pool:
             workers = []
             for addon in addons:
@@ -412,21 +444,29 @@ class Core:
             return False
 
     def backup_wtf(self, console):
-        zipf = zipfile.ZipFile(Path('WTF-Backup', f'{datetime.datetime.now().strftime("%d%m%y")}.zip'), 'w',
-                               zipfile.ZIP_DEFLATED)
+        archive = Path('WTF-Backup', f'{datetime.datetime.now().strftime("%d%m%y")}.zip')
+        if os.path.isfile(archive):
+            suffix = 1
+            while True:
+                archive = Path('WTF-Backup', f'{datetime.datetime.now().strftime("%d%m%y")}-{suffix}.zip')
+                if not os.path.isfile(archive):
+                    break
+                suffix += 1
+        zipf = zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED)
         filecount = 0
         for _, _, files in os.walk('WTF/', topdown=True, followlinks=True):
             files = [f for f in files if not f[0] == '.']
             filecount += len(files)
-        with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|', auto_refresh=False,
-                      console=console) as progress:
-            task = progress.add_task('', total=filecount)
-            while not progress.finished:
-                for root, _, files in os.walk('WTF/', topdown=True, followlinks=True):
-                    files = [f for f in files if not f[0] == '.']
-                    for f in files:
-                        zipf.write(Path(root, f))
-                        progress.update(task, advance=1, refresh=True)
+        if filecount > 0:
+            with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|', auto_refresh=False,
+                          console=console) as progress:
+                task = progress.add_task('', total=filecount)
+                while not progress.finished:
+                    for root, _, files in os.walk('WTF/', topdown=True, followlinks=True):
+                        files = [f for f in files if not f[0] == '.']
+                        for f in files:
+                            zipf.write(Path(root, f))
+                            progress.update(task, advance=1, refresh=True)
         zipf.close()
 
     def find_orphans(self):
@@ -504,18 +544,21 @@ class Core:
         if slug in self.cfIDs:
             project = self.cfIDs[slug]
         else:
-            payload = self.scraper.get(url + '/download-client')
-            if payload.status_code == 404:
-                renamecheck = self.scraper.get(url, allow_redirects=False)
-                if renamecheck.status_code == 303:
-                    payload = self.scraper.get(f'https://www.curseforge.com{renamecheck.headers["location"]}'
-                                               f'/download-client')
+            try:
+                payload = self.scraper.get(url + '/download-client')
                 if payload.status_code == 404:
-                    if bulk:
-                        return 0
-                    else:
-                        raise RuntimeError(f'{slug}\nThe project could be removed from CurseForge or renamed. Uninstall'
-                                           f' it (and reinstall if it still exists) to fix this issue.')
+                    renamecheck = self.scraper.get(url, allow_redirects=False)
+                    if renamecheck.status_code == 303:
+                        payload = self.scraper.get(f'https://www.curseforge.com{renamecheck.headers["location"]}'
+                                                   f'/download-client')
+                    if payload.status_code == 404:
+                        if bulk:
+                            return 0
+                        else:
+                            raise RuntimeError(f'{slug}\nThe project could be removed from CurseForge or renamed. Unins'
+                                               f'tall it (and reinstall if it still exists) to fix this issue.')
+            except cloudscraper.CloudflareChallengeError:
+                return 0
             xml = parseString(payload.text)
             project = xml.childNodes[0].getElementsByTagName('project')[0].getAttribute('id')
             self.config['CFCacheCloudFlare'][slug] = project
@@ -555,6 +598,19 @@ class Core:
             if 'ERROR' not in payload:
                 for addon in payload:
                     self.wowiCache[str(addon['UID'])] = addon
+
+    @retry(custom_error='Failed to parse Tukui API data')
+    def bulk_tukui_check(self):
+        if not self.tukuiCache:
+            self.tukuiCache = requests.get(f'https://www.tukui.org/api.php?'
+                                           f'{"addons" if self.clientType == "wow_retail" else "classic-addons"}',
+                                           headers=HEADERS, timeout=5).json()
+
+    @retry(custom_error='Failed to parse Townlong Yak API data')
+    def bulk_townlongyak_check(self):
+        if not self.townlongyakCache:
+            self.townlongyakCache = requests.get('https://hub.wowup.io/addons/author/foxlit',
+                                                 headers=HEADERS, timeout=5).json()
 
     def detect_accounts(self):
         if os.path.isdir(Path('WTF/Account')):
@@ -669,6 +725,8 @@ class Core:
                 url = f'tuc:{addon["URL"].split("?id=")[-1]}'
             elif addon['URL'].startswith('https://github.com/'):
                 url = f'gh:{addon["URL"].replace("https://github.com/", "")}'
+            elif addon['URL'].startswith('https://www.townlong-yak.com/addons/'):
+                url = f'ty:{addon["URL"].replace("https://www.townlong-yak.com/addons/", "")}'
             else:
                 url = addon['URL'].lower()
             addons.append(url)
